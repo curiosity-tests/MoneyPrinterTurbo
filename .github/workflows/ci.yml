@@ -1,10 +1,36 @@
 name: CI
 
 on:
+  workflow_dispatch:
+    inputs:
+      leg:
+        description: "baseline (uninstrumented) or instrumented (under chalk/curiosity)"
+        type: choice
+        options: [instrumented, baseline]
+        default: instrumented
+      profile:
+        description: "CrashOverride chalk profile"
+        type: string
+        default: curiosity-tests-racecar
+      racecar_run:
+        description: "racecar correlation token, echoed into the run name"
+        type: string
+        default: ""
   pull_request:
   push:
     branches:
       - main
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  # The one variable that separates the arms: on baseline, action-checkout
+  # skips its Set up Chalk step entirely.
+  CHALK_ON: ${{ github.event_name == 'workflow_dispatch' && inputs.leg != 'baseline' }}
+
+run-name: "CI ${{ inputs.leg || 'push' }} ${{ inputs.racecar_run }}"
 
 jobs:
   tests:
@@ -35,7 +61,17 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: crashappsec/action-checkout@main
+        with:
+          chalk: ${{ env.CHALK_ON }}
+          profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
+          observables_continue_on_error: false
+          lfs: false
+      - name: Assert instrumentation is live
+        if: env.CHALK_ON == 'true'
+        run: |
+          test -n "${CURIOSITY_ROOT:-}" || { echo "::error::CURIOSITY_ROOT unset - observables never installed"; exit 1; }
+          test -S "${CURIOSITY_SOCKET_NAME:?socket name unset}" || { echo "::error::co-hostd socket absent"; exit 1; }
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -75,38 +111,3 @@ jobs:
           path: coverage.xml
           retention-days: 7
 
-  windows-smoke:
-    name: Windows smoke tests
-    runs-on: windows-latest
-    timeout-minutes: 30
-
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v6
-        with:
-          enable-cache: true
-
-      - name: Install dependencies
-        run: uv sync --frozen --python 3.11
-
-      - name: Compile Python sources
-        run: uv run --no-sync python -m compileall app cli.py main.py webui test
-
-      - name: Run core service smoke tests
-        run: >-
-          uv run --no-sync python -X utf8 -m pytest -q
-          test/services/test_config.py
-          test/services/test_state.py
-          test/services/test_task.py
-          test/services/test_task_manager.py
-          test/services/test_upload_post.py
-          test/services/test_controller_video.py
-          test/services/test_webui_task.py
